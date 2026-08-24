@@ -2,6 +2,10 @@ import { createHash } from "crypto";
 import { readdir, readFile, rm, stat } from "fs/promises";
 import { join } from "path";
 import { writeJsonAtomic } from "./atomic-json.js";
+import {
+  buildCredentialEnvFingerprint,
+  buildCustomApiKeyEnvFingerprint,
+} from "./credential-env.js";
 import type { QuotaProvider, QuotaProviderContext, QuotaProviderResult } from "./entries.js";
 import { getOpencodeRuntimeDirs } from "./opencode-runtime-paths.js";
 import { getQuotaProviderDisplayLabel, isLiveLocalUsageProviderId } from "./provider-metadata.js";
@@ -32,7 +36,11 @@ let lastPruneAtMs = 0;
 export function buildQuotaProviderStateCacheKey(
   providerId: string,
   ctx: QuotaProviderContext,
-  options: { runtimeEligibleQuotaProviders?: readonly QuotaProviderDefinition[] } = {},
+  options: {
+    runtimeEligibleQuotaProviders?: readonly QuotaProviderDefinition[];
+    /** Injectable credential env source (defaults to process.env); used for tests. */
+    credentialEnv?: Record<string, string | undefined>;
+  } = {},
 ): string {
   const googleModels = ctx.config.googleModels.join(",");
   const cursorPlan = ctx.config.cursorPlan;
@@ -53,6 +61,20 @@ export function buildQuotaProviderStateCacheKey(
     relevantQuotaProviders.length > 0
       ? `|quotaProviders=${JSON.stringify(["quota-providers-cache-v1", relevantQuotaProviders])}`
       : "";
+  const credentialEnv = options.credentialEnv ?? process.env;
+  const customApiKeyEnvFingerprint = buildCustomApiKeyEnvFingerprint(
+    relevantQuotaProviders.map((definition) =>
+      "apiKeyEnv" in definition ? definition.apiKeyEnv : undefined,
+    ),
+    credentialEnv,
+  );
+  const customApiKeyEnvIdentity =
+    customApiKeyEnvFingerprint !== "" && relevantQuotaProviders.length > 0
+      ? `|quotaProvidersCredFingerprint=${customApiKeyEnvFingerprint}`
+      : "";
+  const credentialFingerprint = buildCredentialEnvFingerprint(credentialEnv);
+  const credentialIdentity =
+    credentialFingerprint !== "" ? `|credFingerprint=${credentialFingerprint}` : "";
   const runtimeEligibleIdentity = isAggregateCache
     ? `|runtimeEligibleQuotaProviders=${JSON.stringify([
         "quota-providers-runtime-eligible-v1",
@@ -60,7 +82,7 @@ export function buildQuotaProviderStateCacheKey(
       ])}`
     : "";
 
-  return `${providerId}${quotaProvidersIdentity}${runtimeEligibleIdentity}|anthropicBinaryPath=${anthropicBinaryPath}|googleModels=${googleModels}|cursorPlan=${cursorPlan}|cursorIncludedApiUsd=${cursorIncludedApiUsd}|cursorBillingCycleStartDay=${cursorBillingCycleStartDay}|opencodeGoWindows=${opencodeGoWindows}|onlyCurrentModel=${onlyCurrentModel}|currentModel=${currentModel}|currentProviderID=${currentProviderID}`;
+  return `${providerId}${quotaProvidersIdentity}${customApiKeyEnvIdentity}${runtimeEligibleIdentity}|anthropicBinaryPath=${anthropicBinaryPath}|googleModels=${googleModels}|cursorPlan=${cursorPlan}|cursorIncludedApiUsd=${cursorIncludedApiUsd}|cursorBillingCycleStartDay=${cursorBillingCycleStartDay}|opencodeGoWindows=${opencodeGoWindows}|onlyCurrentModel=${onlyCurrentModel}|currentModel=${currentModel}|currentProviderID=${currentProviderID}${credentialIdentity}`;
 }
 
 function getQuotaProviderCacheDir(): string {

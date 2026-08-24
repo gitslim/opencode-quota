@@ -218,6 +218,74 @@ describe("quota-state shared cache", () => {
     }
   });
 
+  it("isolates cache identity per credential value without embedding the value", async () => {
+    const { buildQuotaProviderStateCacheKey } = await import("../src/lib/quota-state.js");
+    const base = createTestContext();
+    process.env.ZAI_API_KEY = "account-one-credential";
+    try {
+      const keyOne = buildQuotaProviderStateCacheKey("zai", base as any);
+      const keyOneRepeat = buildQuotaProviderStateCacheKey("zai", base as any);
+      expect(keyOne).toBe(keyOneRepeat);
+      expect(keyOne).not.toContain("account-one-credential");
+
+      process.env.ZAI_API_KEY = "account-two-credential";
+      const keyTwo = buildQuotaProviderStateCacheKey("zai", base as any);
+      expect(keyTwo).not.toBe(keyOne);
+      expect(keyTwo).not.toContain("account-two-credential");
+
+      delete process.env.ZAI_API_KEY;
+      const keyWithoutCredentials = buildQuotaProviderStateCacheKey("zai", base as any);
+      expect(keyWithoutCredentials).not.toContain("credFingerprint=");
+
+      const injected = buildQuotaProviderStateCacheKey("zai", base as any, {
+        credentialEnv: { ZAI_API_KEY: "injected-credential" },
+      });
+      expect(injected).not.toBe(keyWithoutCredentials);
+      expect(injected).not.toContain("injected-credential");
+    } finally {
+      delete process.env.ZAI_API_KEY;
+    }
+  });
+
+  it("fingerprints custom quota-provider apiKeyEnv values without embedding them", async () => {
+    const { buildQuotaProviderStateCacheKey } = await import("../src/lib/quota-state.js");
+    const base = createTestContext();
+    const definition = {
+      id: "custom-one",
+      providerId: "provider-one",
+      label: "Custom One",
+      url: "https://one.example/key",
+      format: "openrouter-key-v1",
+      apiKeyEnv: "CUSTOM_QUOTA_KEY",
+    };
+    process.env.CUSTOM_QUOTA_KEY = "custom-account-one";
+    try {
+      const keyOne = buildQuotaProviderStateCacheKey("quota-providers", {
+        ...base,
+        config: { ...base.config, quotaProviders: [definition] },
+      } as any);
+      expect(keyOne).toContain("CUSTOM_QUOTA_KEY");
+      expect(keyOne).not.toContain("custom-account-one");
+
+      process.env.CUSTOM_QUOTA_KEY = "custom-account-two";
+      const keyTwo = buildQuotaProviderStateCacheKey("quota-providers", {
+        ...base,
+        config: { ...base.config, quotaProviders: [definition] },
+      } as any);
+      expect(keyTwo).not.toBe(keyOne);
+      expect(keyTwo).not.toContain("custom-account-two");
+
+      delete process.env.CUSTOM_QUOTA_KEY;
+      const keyUnset = buildQuotaProviderStateCacheKey("quota-providers", {
+        ...base,
+        config: { ...base.config, quotaProviders: [definition] },
+      } as any);
+      expect(keyUnset).not.toContain("quotaProvidersCredFingerprint=");
+    } finally {
+      delete process.env.CUSTOM_QUOTA_KEY;
+    }
+  });
+
   it("isolates aggregate cache entries for disjoint project provider catalogs", async () => {
     const { __resetQuotaStateForTests, fetchQuotaProviderResult } = await import(
       "../src/lib/quota-state.js"
