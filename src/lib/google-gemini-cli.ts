@@ -353,7 +353,6 @@ async function refreshGeminiCliAccessTokenWithCache(params: {
   const key = makeAccountCacheKey({
     refreshToken: params.account.refreshToken,
     projectId: params.account.projectId,
-    email: params.account.email,
   });
 
   if (!params.force) {
@@ -382,8 +381,6 @@ async function refreshGeminiCliAccessTokenWithCache(params: {
     entry: {
       accessToken: refreshed.accessToken,
       expiresAt: Date.now() + Math.max(1, refreshed.expiresIn) * 1000,
-      projectId: params.account.projectId,
-      email: params.account.email,
     },
   });
 

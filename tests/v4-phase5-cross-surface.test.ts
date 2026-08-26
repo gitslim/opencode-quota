@@ -660,6 +660,7 @@ describe("v4 Phase 5 cross-surface release evidence", () => {
     currentConfig = configForMiniMax();
     mocks.loadConfig.mockImplementation(async () => currentConfig);
     const { minimaxCodingPlanProvider } = await import("../src/providers/minimax-coding-plan.js");
+    minimaxCodingPlanProvider.cachePolicy = { kind: "account-neutral" };
     mocks.getProviders.mockReturnValue([minimaxCodingPlanProvider]);
 
     const client = createClient();

@@ -1,8 +1,10 @@
 import { createHash } from "node:crypto";
 import { access, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { basename } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { validateQuotaProviders } from "../src/lib/quota-providers.js";
+import { PROVIDER_CACHE_POLICIES } from "../src/providers/cache-policies.js";
 
 const TEST_RUNTIME_ROOT = "/tmp/opencode-quota-state-tests";
 const TEST_ACCOUNTING = {
@@ -103,6 +105,107 @@ describe("quota-state shared cache", () => {
       hit: true,
       result: { entries: [{ name: "Cursor", percentRemaining: 64 }] },
     });
+  });
+
+  it("fails closed for missing policies while requiring account-neutral reuse to be explicit", async () => {
+    const quotaState = await import("../src/lib/quota-state.js");
+    quotaState.__resetQuotaStateForTests();
+    const ctx = createTestContext();
+    let missingFetchCount = 0;
+    const missingPolicyProvider = {
+      id: "missing-policy",
+      isAvailable: vi.fn(),
+      fetch: vi.fn(async () => ({
+        attempted: true,
+        entries: [
+          {
+            accounting: TEST_ACCOUNTING,
+            name: `missing-${++missingFetchCount}`,
+            percentRemaining: 50,
+          },
+        ],
+        errors: [],
+      })),
+    } as any;
+
+    const missingFirst = await quotaState.fetchQuotaProviderResult({
+      provider: missingPolicyProvider,
+      ctx,
+      ttlMs: 60_000,
+    });
+    const missingSecond = await quotaState.fetchQuotaProviderResult({
+      provider: missingPolicyProvider,
+      ctx,
+      ttlMs: 60_000,
+    });
+    const latestForExport = await quotaState.readCachedProviderResult({
+      provider: missingPolicyProvider,
+      ctx,
+      ttlMs: 60_000,
+    });
+    const sameIdDifferentInstance = await quotaState.readCachedProviderResult({
+      provider: { ...missingPolicyProvider },
+      ctx,
+      ttlMs: 60_000,
+    });
+    const missingKey = quotaState.buildQuotaProviderStateCacheKey(missingPolicyProvider.id, ctx);
+    const missingPath = quotaState.getQuotaProviderStateCacheFilePath(
+      missingPolicyProvider.id,
+      missingKey,
+    );
+
+    expect(missingFirst.entries[0]?.name).toBe("missing-1");
+    expect(missingSecond.entries[0]?.name).toBe("missing-2");
+    expect(missingPolicyProvider.fetch).toHaveBeenCalledTimes(2);
+    expect(latestForExport).toMatchObject({
+      hit: true,
+      result: { entries: [{ name: "missing-2" }] },
+    });
+    expect(sameIdDifferentInstance).toEqual({ hit: false });
+    await expect(access(missingPath)).rejects.toMatchObject({ code: "ENOENT" });
+
+    const explicitProvider = {
+      ...missingPolicyProvider,
+      id: "explicit-account-neutral",
+      cachePolicy: { kind: "account-neutral" as const },
+      fetch: vi.fn().mockResolvedValue({
+        attempted: true,
+        entries: [{ accounting: TEST_ACCOUNTING, name: "explicit", percentRemaining: 75 }],
+        errors: [],
+      }),
+    };
+    await quotaState.fetchQuotaProviderResult({ provider: explicitProvider, ctx, ttlMs: 60_000 });
+    await quotaState.fetchQuotaProviderResult({ provider: explicitProvider, ctx, ttlMs: 60_000 });
+    const explicitKey = quotaState.buildQuotaProviderStateCacheKey(explicitProvider.id, ctx);
+    const explicitPath = quotaState.getQuotaProviderStateCacheFilePath(
+      explicitProvider.id,
+      explicitKey,
+    );
+
+    expect(explicitProvider.fetch).toHaveBeenCalledTimes(1);
+    await expect(access(explicitPath)).resolves.toBeUndefined();
+  });
+
+  it("uses Windows-safe deterministic filenames for nested and custom provider ids", async () => {
+    const { getQuotaProviderStateCacheFilePath } = await import("../src/lib/quota-state.js");
+    const nested = basename(
+      getQuotaProviderStateCacheFilePath("quota-providers:custom/provider", "opaque-key"),
+    );
+    const repeated = basename(
+      getQuotaProviderStateCacheFilePath("quota-providers:custom/provider", "opaque-key"),
+    );
+    const reserved = basename(getQuotaProviderStateCacheFilePath("CON", "opaque-key"));
+    const canonical = basename(getQuotaProviderStateCacheFilePath("cursor", "opaque-key"));
+
+    expect(nested).toBe(repeated);
+    expect(nested).toMatch(/^provider-[a-f0-9]{64}-[a-f0-9]{64}\.json$/u);
+    expect(
+      [...nested].some(
+        (character) => character.charCodeAt(0) < 32 || `<>:"/\\|?*`.includes(character),
+      ),
+    ).toBe(false);
+    expect(reserved).toMatch(/^provider-[a-f0-9]{64}-[a-f0-9]{64}\.json$/u);
+    expect(canonical).toMatch(/^cursor-[a-f0-9]{64}\.json$/u);
   });
 
   it("uses identical cache identity for alias-normalized and canonical definitions", async () => {
@@ -403,6 +506,7 @@ describe("quota-state shared cache", () => {
     ];
     const provider = {
       id: "quota-providers",
+      cachePolicy: PROVIDER_CACHE_POLICIES["quota-providers"],
       isAvailable: vi.fn(),
       fetch: vi.fn(async (_ctx: any, cacheContext: any) => {
         const name = cacheContext.runtimeEligibleQuotaProviders[0].providerId;
@@ -529,6 +633,7 @@ describe("quota-state shared cache", () => {
     let fetchCount = 0;
     const provider = {
       id: "quota-providers",
+      cachePolicy: PROVIDER_CACHE_POLICIES["quota-providers"],
       isAvailable: vi.fn(),
       fetch: vi.fn(async () => ({
         attempted: true,
@@ -586,6 +691,7 @@ describe("quota-state shared cache", () => {
 
     const provider = {
       id: "quota-providers:remote-project",
+      cachePolicy: { kind: "account-neutral" },
       isAvailable: vi.fn(),
       fetch: vi.fn().mockResolvedValue({
         attempted: true,
@@ -636,6 +742,7 @@ describe("quota-state shared cache", () => {
     let fetchCount = 0;
     const provider = {
       id: "quota-providers",
+      cachePolicy: PROVIDER_CACHE_POLICIES["quota-providers"],
       isAvailable: vi.fn(),
       fetch: vi.fn(async () => {
         fetchCount += 1;
@@ -696,6 +803,7 @@ describe("quota-state shared cache", () => {
 
     const provider = {
       id: "synthetic",
+      cachePolicy: { kind: "account-neutral" },
       isAvailable: vi.fn(),
       fetch: vi.fn().mockResolvedValue({
         attempted: true,
@@ -813,6 +921,7 @@ describe("quota-state shared cache", () => {
     ] as const;
     const provider = {
       id: "synthetic",
+      cachePolicy: { kind: "account-neutral" },
       isAvailable: vi.fn(),
       fetch: vi.fn().mockResolvedValue({ attempted: true, entries, errors: [] }),
     } as any;
@@ -843,6 +952,7 @@ describe("quota-state shared cache", () => {
     let resolveFetch!: (value: unknown) => void;
     const provider = {
       id: "synthetic",
+      cachePolicy: { kind: "account-neutral" },
       isAvailable: vi.fn(),
       fetch: vi.fn(
         () =>
@@ -874,6 +984,7 @@ describe("quota-state shared cache", () => {
     __resetQuotaStateForTests();
     const provider = {
       id: "synthetic",
+      cachePolicy: { kind: "account-neutral" },
       isAvailable: vi.fn(),
       fetch: vi
         .fn()
@@ -929,6 +1040,7 @@ describe("quota-state shared cache", () => {
     });
     const provider = {
       id: "synthetic",
+      cachePolicy: { kind: "account-neutral" },
       isAvailable: vi.fn(),
       fetch: vi.fn().mockResolvedValue({
         attempted: true,
@@ -1018,6 +1130,7 @@ describe("quota-state shared cache", () => {
 
     const provider = {
       id: "synthetic",
+      cachePolicy: { kind: "account-neutral" },
       isAvailable: vi.fn(),
       fetch: vi.fn().mockResolvedValue({
         attempted: true,
@@ -1067,6 +1180,7 @@ describe("quota-state shared cache", () => {
 
     const provider = {
       id: "synthetic",
+      cachePolicy: { kind: "account-neutral" },
       isAvailable: vi.fn(),
       fetch: vi.fn().mockResolvedValue({
         attempted: true,
@@ -1121,6 +1235,7 @@ describe("quota-state shared cache", () => {
 
     const provider = {
       id: "synthetic",
+      cachePolicy: { kind: "account-neutral" },
       isAvailable: vi.fn(),
       fetch: vi.fn().mockResolvedValue({
         attempted: true,
@@ -1149,6 +1264,7 @@ describe("quota-state shared cache", () => {
     let resolveFetch: ((value: any) => void) | undefined;
     const provider = {
       id: "synthetic",
+      cachePolicy: { kind: "account-neutral" },
       isAvailable: vi.fn(),
       fetch: vi
         .fn()
@@ -1189,6 +1305,7 @@ describe("quota-state shared cache", () => {
     let resolveFetch: ((value: any) => void) | undefined;
     const provider = {
       id: "synthetic",
+      cachePolicy: { kind: "account-neutral" },
       isAvailable: vi.fn(),
       fetch: vi
         .fn()
@@ -1229,6 +1346,7 @@ describe("quota-state shared cache", () => {
     let resolveFetch: ((value: any) => void) | undefined;
     const provider = {
       id: "synthetic",
+      cachePolicy: { kind: "account-neutral" },
       isAvailable: vi.fn(),
       fetch: vi
         .fn()
@@ -1270,6 +1388,7 @@ describe("quota-state shared cache", () => {
     quotaState.__resetQuotaStateForTests();
     const provider = {
       id: "synthetic",
+      cachePolicy: { kind: "account-neutral" },
       isAvailable: vi.fn(),
       fetch: vi.fn().mockResolvedValue({
         attempted: true,
@@ -1296,6 +1415,7 @@ describe("quota-state shared cache", () => {
 
     const provider = {
       id: "synthetic",
+      cachePolicy: { kind: "account-neutral" },
       isAvailable: vi.fn(),
       fetch: vi.fn().mockResolvedValue({
         attempted: true,
@@ -1338,6 +1458,7 @@ describe("quota-state shared cache", () => {
 
     const provider = {
       id: "synthetic",
+      cachePolicy: { kind: "account-neutral" },
       isAvailable: vi.fn(),
       fetch: vi.fn().mockResolvedValue({
         attempted: true,
@@ -1380,6 +1501,7 @@ describe("quota-state shared cache", () => {
 
     const provider = {
       id: "anthropic",
+      cachePolicy: { kind: "account-neutral" },
       isAvailable: vi.fn(),
       fetch: vi.fn().mockResolvedValue({
         attempted: true,
@@ -1406,6 +1528,7 @@ describe("quota-state shared cache", () => {
 
     const provider = {
       id: "quota-providers",
+      cachePolicy: { kind: "account-neutral" },
       isAvailable: vi.fn(),
       fetch: vi.fn().mockResolvedValue({
         attempted: true,
@@ -1518,6 +1641,7 @@ describe("quota-state shared cache", () => {
     } as const;
     const provider = {
       id: "quota-providers",
+      cachePolicy: { kind: "account-neutral" },
       isAvailable: vi.fn(),
       fetch: vi.fn().mockResolvedValue(freshResult),
     } as any;
@@ -1614,6 +1738,7 @@ describe("quota-state shared cache", () => {
 
     const provider = {
       id: "synthetic",
+      cachePolicy: { kind: "account-neutral" },
       isAvailable: vi.fn(),
       fetch: vi.fn().mockResolvedValue({
         attempted: true,
@@ -1660,6 +1785,7 @@ describe("quota-state shared cache", () => {
     quotaState.__resetQuotaStateForTests();
     const provider = {
       id: "synthetic",
+      cachePolicy: { kind: "account-neutral" },
       isAvailable: vi.fn(),
       fetch: vi.fn().mockResolvedValue({
         attempted: true,
@@ -1712,6 +1838,7 @@ describe("quota-state shared cache", () => {
     );
     const provider = {
       id: "synthetic",
+      cachePolicy: { kind: "account-neutral" },
       isAvailable: vi.fn(),
       fetch: vi.fn().mockResolvedValue({
         attempted: true,
@@ -1833,6 +1960,7 @@ describe("quota-state shared cache", () => {
     quotaStateA.__resetQuotaStateForTests();
     const provider = {
       id: "synthetic",
+      cachePolicy: { kind: "account-neutral" },
       isAvailable: vi.fn(),
       fetch: vi.fn().mockResolvedValue({
         attempted: true,
@@ -1878,6 +2006,7 @@ describe("quota-state shared cache", () => {
     );
     const provider = {
       id: "opencode",
+      cachePolicy: { kind: "account-neutral" },
       isAvailable: vi.fn(),
       fetch: vi.fn().mockResolvedValue({
         attempted: true,
@@ -1915,6 +2044,7 @@ describe("quota-state shared cache", () => {
     quotaState.__resetQuotaStateForTests();
     const provider = {
       id: "synthetic",
+      cachePolicy: { kind: "account-neutral" },
       isAvailable: vi.fn(),
       fetch: vi.fn().mockResolvedValue({
         attempted: true,
@@ -1980,6 +2110,7 @@ describe("readCachedProviderResult", () => {
 
     const provider = {
       id: "synthetic",
+      cachePolicy: { kind: "account-neutral" },
       isAvailable: vi.fn(),
       fetch: vi.fn(),
     } as any;
@@ -2000,6 +2131,7 @@ describe("readCachedProviderResult", () => {
 
     const provider = {
       id: "synthetic",
+      cachePolicy: { kind: "account-neutral" },
       isAvailable: vi.fn(),
       fetch: vi.fn().mockResolvedValue({
         attempted: true,
@@ -2036,6 +2168,7 @@ describe("readCachedProviderResult", () => {
 
     const provider = {
       id: "synthetic",
+      cachePolicy: { kind: "account-neutral" },
       isAvailable: vi.fn(),
       fetch: vi.fn().mockResolvedValue({
         attempted: true,

@@ -33,7 +33,6 @@ function bucket(overrides: Record<string, unknown> = {}) {
     bucketId: "gemini-weekly",
     percentRemaining: 58,
     accountEmail: "alice@example.com",
-    accountKey: "aaaaaaaa11111111",
     accountIndex: 0,
     sourceKey: "google-agy",
     ...overrides,
@@ -146,13 +145,11 @@ describe("google agy provider", () => {
       buckets: [
         bucket({
           accountEmail: undefined,
-          accountKey: "aaaaaaaa11111111",
           accountIndex: 0,
           percentRemaining: 20,
         }),
         bucket({
           accountEmail: undefined,
-          accountKey: "bbbbbbbb22222222",
           accountIndex: 1,
           percentRemaining: 80,
         }),

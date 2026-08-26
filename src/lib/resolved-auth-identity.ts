@@ -1,5 +1,5 @@
 import { createHmac, randomBytes } from "node:crypto";
-import { chmod, lstat, mkdir, open, readFile } from "node:fs/promises";
+import { chmod, link, lstat, mkdir, open, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 
 import { getOpencodeRuntimeDirs } from "./opencode-runtime-paths.js";
@@ -10,6 +10,8 @@ const RESOLVED_AUTH_KEY_FILENAME = "resolved-auth-key-v1";
 const RESOLVED_AUTH_KEY_PREFIX = "v1:";
 const RESOLVED_AUTH_KEY_BYTES = 32;
 const RESOLVED_AUTH_IDENTITY_PREFIX = "rai1_";
+const WINNER_READ_ATTEMPTS = 20;
+const WINNER_READ_DELAY_MS = 5;
 
 const resolvedAuthIdentityBrand: unique symbol = Symbol("ResolvedAuthIdentity");
 
@@ -28,6 +30,20 @@ export type ResolvedAuthPrincipal =
   | { kind: "credential"; value: string };
 
 let identityKeyPromise: Promise<Buffer | null> | null = null;
+
+export function isProtectedResolvedAuthStorageSupported(params: {
+  platform: NodeJS.Platform;
+  hasOwnerIdentity: boolean;
+}): boolean {
+  return params.platform !== "win32" && params.hasOwnerIdentity;
+}
+
+function canProtectIdentityStorage(): boolean {
+  return isProtectedResolvedAuthStorageSupported({
+    platform: process.platform,
+    hasOwnerIdentity: typeof process.getuid === "function",
+  });
+}
 
 export function getResolvedAuthIdentityKeyPath(): string {
   return join(
@@ -51,12 +67,14 @@ function decodeIdentityKey(raw: string): Buffer | null {
 
 async function readProtectedIdentityKey(path: string): Promise<Buffer | null> {
   try {
+    if (!canProtectIdentityStorage()) return null;
+    const uid = process.getuid?.();
+    if (uid === undefined) return null;
+
     let info = await lstat(path);
-    if (!info.isFile() || info.isSymbolicLink()) return null;
+    if (!info.isFile() || info.isSymbolicLink() || info.uid !== uid) return null;
 
-    if (typeof process.getuid === "function" && info.uid !== process.getuid()) return null;
-
-    if (process.platform !== "win32" && (info.mode & 0o077) !== 0) {
+    if ((info.mode & 0o077) !== 0) {
       await chmod(path, 0o600);
       info = await lstat(path);
       if ((info.mode & 0o077) !== 0) return null;
@@ -68,13 +86,26 @@ async function readProtectedIdentityKey(path: string): Promise<Buffer | null> {
   }
 }
 
+async function readPublishedIdentityKey(path: string): Promise<Buffer | null> {
+  for (let attempt = 0; attempt < WINNER_READ_ATTEMPTS; attempt += 1) {
+    const key = await readProtectedIdentityKey(path);
+    if (key) return key;
+    if (attempt + 1 < WINNER_READ_ATTEMPTS) {
+      await new Promise((resolve) => setTimeout(resolve, WINNER_READ_DELAY_MS));
+    }
+  }
+  return null;
+}
+
 async function protectIdentityKeyDirectory(directory: string): Promise<boolean> {
+  if (!canProtectIdentityStorage()) return false;
+  const uid = process.getuid?.();
+  if (uid === undefined) return false;
+
   let info = await lstat(directory);
-  if (!info.isDirectory() || info.isSymbolicLink()) return false;
+  if (!info.isDirectory() || info.isSymbolicLink() || info.uid !== uid) return false;
 
-  if (typeof process.getuid === "function" && info.uid !== process.getuid()) return false;
-
-  if (process.platform !== "win32" && (info.mode & 0o077) !== 0) {
+  if ((info.mode & 0o077) !== 0) {
     await chmod(directory, 0o700);
     info = await lstat(directory);
     if ((info.mode & 0o077) !== 0) return false;
@@ -83,7 +114,19 @@ async function protectIdentityKeyDirectory(directory: string): Promise<boolean> 
   return true;
 }
 
+async function writeTemporaryIdentityKey(path: string, key: Buffer): Promise<void> {
+  const handle = await open(path, "wx", 0o600);
+  try {
+    await handle.writeFile(`${RESOLVED_AUTH_KEY_PREFIX}${key.toString("base64url")}\n`, "utf8");
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+
 async function createOrReadIdentityKey(): Promise<Buffer | null> {
+  if (!canProtectIdentityStorage()) return null;
+
   const path = getResolvedAuthIdentityKeyPath();
   const directory = join(getOpencodeRuntimeDirs().stateDir, RESOLVED_AUTH_KEY_DIRNAME);
 
@@ -94,22 +137,21 @@ async function createOrReadIdentityKey(): Promise<Buffer | null> {
     const existing = await readProtectedIdentityKey(path);
     if (existing) return existing;
 
+    const generated = randomBytes(RESOLVED_AUTH_KEY_BYTES);
+    const temporaryPath = `${path}.tmp-${process.pid}-${randomBytes(8).toString("hex")}`;
     try {
-      const generated = randomBytes(RESOLVED_AUTH_KEY_BYTES);
-      const handle = await open(path, "wx", 0o600);
+      await writeTemporaryIdentityKey(temporaryPath, generated);
+      if (!(await readProtectedIdentityKey(temporaryPath))) return null;
+
       try {
-        await handle.writeFile(
-          `${RESOLVED_AUTH_KEY_PREFIX}${generated.toString("base64url")}\n`,
-          "utf8",
-        );
-        await handle.sync();
-      } finally {
-        await handle.close();
+        await link(temporaryPath, path);
+        return await readProtectedIdentityKey(path);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException | undefined)?.code !== "EEXIST") return null;
+        return await readPublishedIdentityKey(path);
       }
-      return generated;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException | undefined)?.code !== "EEXIST") return null;
-      return await readProtectedIdentityKey(path);
+    } finally {
+      await rm(temporaryPath, { force: true }).catch(() => undefined);
     }
   } catch {
     return null;
@@ -117,8 +159,19 @@ async function createOrReadIdentityKey(): Promise<Buffer | null> {
 }
 
 async function getIdentityKey(): Promise<Buffer | null> {
-  identityKeyPromise ??= createOrReadIdentityKey();
-  return identityKeyPromise;
+  const existing = identityKeyPromise;
+  if (existing) return existing;
+
+  const attempt = createOrReadIdentityKey();
+  identityKeyPromise = attempt;
+  try {
+    const key = await attempt;
+    if (!key && identityKeyPromise === attempt) identityKeyPromise = null;
+    return key;
+  } catch (error) {
+    if (identityKeyPromise === attempt) identityKeyPromise = null;
+    throw error;
+  }
 }
 
 function identityPayload(parts: readonly unknown[]): string {

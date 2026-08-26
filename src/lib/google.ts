@@ -313,7 +313,6 @@ async function refreshAccessTokenWithCache(params: {
   const key = makeAccountCacheKey({
     refreshToken: params.refreshToken,
     projectId: params.projectId,
-    email: params.email,
   });
 
   if (!params.force) {
@@ -334,8 +333,6 @@ async function refreshAccessTokenWithCache(params: {
     entry: {
       accessToken: refreshed.accessToken,
       expiresAt: Date.now() + Math.max(1, refreshed.expiresIn) * 1000,
-      projectId: params.projectId,
-      email: params.email,
     },
   });
 
@@ -593,12 +590,13 @@ async function fetchAccountQuotaWithAntigravityRefresh(params: {
           return { success: false, error: retryToken.error, accountEmail: email };
         }
         await setCachedAccessToken({
-          key: makeAccountCacheKey({ refreshToken: params.account.refreshToken, projectId, email }),
+          key: makeAccountCacheKey({
+            refreshToken: params.account.refreshToken,
+            projectId,
+          }),
           entry: {
             accessToken: retryToken.accessToken,
             expiresAt: Date.now() + Math.max(1, retryToken.expiresIn) * 1000,
-            projectId,
-            email,
           },
         });
         data = await fetchGoogleQuota(retryToken.accessToken, projectId, params.timeoutMs);

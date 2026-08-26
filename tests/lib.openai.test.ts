@@ -61,6 +61,39 @@ describe("openai auth resolution", () => {
     );
   });
 
+  it("uses the winning credential rather than advisory email when no account id exists", async () => {
+    const emailPayload = Buffer.from(JSON.stringify({ email: "shared@example.com" })).toString(
+      "base64url",
+    );
+    mocks.readAuthFileCached
+      .mockResolvedValueOnce({
+        openai: {
+          type: "oauth",
+          access: `header.${emailPayload}.signature-one`,
+          refresh: "refresh-secret-one",
+        },
+      })
+      .mockResolvedValueOnce({
+        openai: {
+          type: "oauth",
+          access: `header.${emailPayload}.signature-two`,
+          refresh: "refresh-secret-two",
+        },
+      });
+
+    await resolveOpenAIAuthIdentity();
+    await resolveOpenAIAuthIdentity();
+
+    expect(mocks.deriveResolvedAuthIdentity).toHaveBeenNthCalledWith(1, {
+      providerId: "openai",
+      principal: { kind: "credential", value: "refresh-secret-one" },
+    });
+    expect(mocks.deriveResolvedAuthIdentity).toHaveBeenNthCalledWith(2, {
+      providerId: "openai",
+      principal: { kind: "credential", value: "refresh-secret-two" },
+    });
+  });
+
   it("returns none when no supported native OpenCode auth entry exists", () => {
     expect(resolveOpenAIOAuth({})).toEqual({ state: "none" });
   });

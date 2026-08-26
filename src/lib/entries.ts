@@ -397,8 +397,8 @@ export interface QuotaProvider {
 
   /**
    * Shared-cache safety policy. Canonical runtime providers are classified in
-   * the registry. Missing policy is retained only for account-neutral external
-   * and test providers.
+   * the registry. Missing policy fails closed as uncached; account-neutral
+   * caching must be explicit.
    */
   cachePolicy?: QuotaProviderCachePolicy;
 

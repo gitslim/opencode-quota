@@ -64,19 +64,6 @@ export type AgyAccount = {
   expiresAt?: number;
 };
 
-function createAgyAccountKey(
-  account: Pick<AgyAccount, "sourceKey" | "refreshToken" | "projectId">,
-): string {
-  return crypto
-    .createHash("sha256")
-    .update(account.sourceKey)
-    .update("\0")
-    .update(account.projectId)
-    .update("\0")
-    .update(account.refreshToken)
-    .digest("hex");
-}
-
 export type AgyAuthPresence =
   | {
       state: "missing";
@@ -224,13 +211,8 @@ export async function resolveGoogleAgyAuthIdentity(
     accounts.map((account) =>
       deriveResolvedAuthIdentity({
         providerId: "google-agy",
-        principal: account.email
-          ? {
-              kind: "stable-id" as const,
-              value: `${account.projectId}\0${account.email}`,
-            }
-          : { kind: "credential" as const, value: account.refreshToken },
-        qualifiers: account.email ? [] : [account.projectId],
+        principal: { kind: "credential" as const, value: account.refreshToken },
+        qualifiers: [account.projectId],
       }),
     ),
   );
@@ -370,7 +352,6 @@ async function refreshAgyAccessTokenWithCache(params: {
   const key = makeAccountCacheKey({
     refreshToken: params.account.refreshToken,
     projectId: params.account.projectId,
-    email: params.account.email,
   });
 
   if (!params.force) {
@@ -399,8 +380,6 @@ async function refreshAgyAccessTokenWithCache(params: {
     entry: {
       accessToken: refreshed.accessToken,
       expiresAt: Date.now() + Math.max(1, refreshed.expiresIn) * 1000,
-      projectId: params.account.projectId,
-      email: params.account.email,
     },
   });
 
@@ -602,7 +581,6 @@ function normalizeSummaryBucket(params: {
     ...(resetTimeIso ? { resetTimeIso } : {}),
     ...(remainingAmount ? { remainingAmount } : {}),
     ...(params.account.email ? { accountEmail: params.account.email } : {}),
-    accountKey: createAgyAccountKey(params.account),
     accountIndex: params.accountIndex,
     sourceKey: params.account.sourceKey,
   };

@@ -185,11 +185,8 @@ describe("google agy logic", () => {
     expect(resolved).toContain("composed:google-agy:");
     expect(mocks.deriveResolvedAuthIdentity).toHaveBeenCalledWith({
       providerId: "google-agy",
-      principal: {
-        kind: "stable-id",
-        value: "project-one\0alice@example.com",
-      },
-      qualifiers: [],
+      principal: { kind: "credential", value: "refresh-one" },
+      qualifiers: ["project-one"],
     });
     expect(mocks.deriveResolvedAuthIdentity).toHaveBeenCalledWith({
       providerId: "google-agy",
@@ -203,6 +200,26 @@ describe("google agy logic", () => {
     });
     expect(mocks.composeResolvedAuthIdentities).toHaveBeenCalledOnce();
     expect(JSON.stringify({ resolved })).not.toContain("ignored-duplicate@example.com");
+  });
+
+  it("separates credentials that share the same advisory email and project", async () => {
+    mocks.readAuthFileCached.mockResolvedValue({
+      "google-agy": authAccount("refresh-one", "shared-project", "shared@example.com"),
+      "opencode-agy-auth": authAccount("refresh-two", "shared-project", "shared@example.com"),
+    });
+
+    await resolveGoogleAgyAuthIdentity();
+
+    expect(mocks.deriveResolvedAuthIdentity).toHaveBeenCalledWith({
+      providerId: "google-agy",
+      principal: { kind: "credential", value: "refresh-one" },
+      qualifiers: ["shared-project"],
+    });
+    expect(mocks.deriveResolvedAuthIdentity).toHaveBeenCalledWith({
+      providerId: "google-agy",
+      principal: { kind: "credential", value: "refresh-two" },
+      qualifiers: ["shared-project"],
+    });
   });
 
   it("parses packed refresh strings", () => {
@@ -407,7 +424,7 @@ describe("google agy logic", () => {
     expect(result.buckets.every((bucket) => bucket.accountEmail === "alice@example.com")).toBe(
       true,
     );
-    expect(result.buckets.every((bucket) => bucket.accountKey.length === 64)).toBe(true);
+    expect(JSON.stringify(result.buckets)).not.toContain("accountKey");
     expect(result.buckets.every((bucket) => bucket.sourceKey === "google-agy")).toBe(true);
   });
 

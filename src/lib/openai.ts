@@ -255,13 +255,6 @@ export async function resolveOpenAIAuthIdentity(params?: {
       principal: { kind: "stable-id", value: resolved.accountId },
     });
   }
-  if (resolved.email) {
-    return deriveResolvedAuthIdentity({
-      providerId: "openai",
-      principal: { kind: "stable-id", value: resolved.email },
-    });
-  }
-
   const credential = resolved.refreshToken ?? resolved.accessToken;
   return deriveResolvedAuthIdentity({
     providerId: "openai",
