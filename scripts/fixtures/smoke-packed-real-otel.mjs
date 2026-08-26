@@ -71,6 +71,7 @@ function createContext(token) {
 function createProvider(id, providerResult, counter) {
   return {
     id,
+    cachePolicy: { kind: "account-neutral" },
     isAvailable: async () => true,
     fetch: async () => {
       counter.count += 1;

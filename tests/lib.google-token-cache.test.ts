@@ -2,18 +2,31 @@ import { access, mkdir, readdir, rm, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const TEST_RUNTIME_ROOT = "/tmp/opencode-quota-google-token-cache-tests";
+const testPaths = vi.hoisted(() => {
+  const separator = process.platform === "win32" ? "\\" : "/";
+  const join = (...parts: string[]) => parts.join(separator);
+  const root = join(process.cwd(), ".google-token-cache-test");
+  return {
+    root,
+    dataDir: join(root, "data"),
+    configDir: join(root, "config"),
+    cacheDir: join(root, "cache"),
+    stateDir: join(root, "state"),
+    cachePath: join(root, "cache", "opencode-quota", "google-access-tokens.json"),
+  };
+});
 
 vi.mock("../src/lib/opencode-runtime-paths.js", () => ({
   getOpencodeRuntimeDirs: () => ({
-    dataDir: `${TEST_RUNTIME_ROOT}/data`,
-    configDir: `${TEST_RUNTIME_ROOT}/config`,
-    cacheDir: `${TEST_RUNTIME_ROOT}/cache`,
-    stateDir: `${TEST_RUNTIME_ROOT}/state`,
+    dataDir: testPaths.dataDir,
+    configDir: testPaths.configDir,
+    cacheDir: testPaths.cacheDir,
+    stateDir: testPaths.stateDir,
   }),
 }));
 
-const CACHE_PATH = `${TEST_RUNTIME_ROOT}/cache/opencode-quota/google-access-tokens.json`;
+const TEST_RUNTIME_ROOT = testPaths.root;
+const CACHE_PATH = testPaths.cachePath;
 
 function entry(accessToken: string, expiresAt = Date.now() + 60_000) {
   return { accessToken, expiresAt };
