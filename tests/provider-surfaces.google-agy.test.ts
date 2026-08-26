@@ -155,14 +155,14 @@ describe("Google AGY provider surfaces", () => {
         "AGY (bob…): Claude/GPT 7d 60%, 5h 80%",
     );
     expect(entries.map((entry) => entry.accounting.sourceId)).toEqual([
-      "account-alice",
-      "account-alice",
-      "account-alice",
-      "account-alice",
-      "account-bob",
-      "account-bob",
-      "account-bob",
-      "account-bob",
+      "account-1",
+      "account-1",
+      "account-1",
+      "account-1",
+      "account-2",
+      "account-2",
+      "account-2",
+      "account-2",
     ]);
   });
 });

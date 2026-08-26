@@ -1,4 +1,5 @@
-import { access, mkdir, readdir, readFile, rm, writeFile } from "fs/promises";
+import { createHash } from "node:crypto";
+import { access, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { validateQuotaProviders } from "../src/lib/quota-providers.js";
@@ -12,6 +13,12 @@ const TEST_ACCOUNTING = {
 } as const;
 
 vi.mock("../src/lib/opencode-runtime-paths.js", () => ({
+  getOpencodeRuntimeDirCandidates: () => ({
+    dataDirs: [`${TEST_RUNTIME_ROOT}/data`],
+    configDirs: [`${TEST_RUNTIME_ROOT}/config`],
+    cacheDirs: [`${TEST_RUNTIME_ROOT}/cache`],
+    stateDirs: [`${TEST_RUNTIME_ROOT}/state`],
+  }),
   getOpencodeRuntimeDirs: () => ({
     dataDir: `${TEST_RUNTIME_ROOT}/data`,
     configDir: `${TEST_RUNTIME_ROOT}/config`,
@@ -218,71 +225,155 @@ describe("quota-state shared cache", () => {
     }
   });
 
-  it("isolates cache identity per credential value without embedding the value", async () => {
-    const { buildQuotaProviderStateCacheKey } = await import("../src/lib/quota-state.js");
-    const base = createTestContext();
-    process.env.ZAI_API_KEY = "account-one-credential";
-    try {
-      const keyOne = buildQuotaProviderStateCacheKey("zai", base as any);
-      const keyOneRepeat = buildQuotaProviderStateCacheKey("zai", base as any);
-      expect(keyOne).toBe(keyOneRepeat);
-      expect(keyOne).not.toContain("account-one-credential");
+  it("isolates cache entries by opaque provider-scoped resolved auth", async () => {
+    const { deriveResolvedAuthIdentity } = await import("../src/lib/resolved-auth-identity.js");
+    const { fetchQuotaProviderResult } = await import("../src/lib/quota-state.js");
+    let credential = "account-one-credential";
+    const provider = {
+      id: "zai",
+      isAvailable: vi.fn(),
+      cachePolicy: {
+        kind: "resolved-auth",
+        resolveIdentity: () =>
+          deriveResolvedAuthIdentity({
+            providerId: "zai",
+            principal: { kind: "credential", value: credential },
+          }),
+      },
+      fetch: vi.fn(async () => ({
+        attempted: true,
+        entries: [
+          {
+            accounting: TEST_ACCOUNTING,
+            name: "Z.ai",
+            percentRemaining: credential === "account-one-credential" ? 75 : 25,
+          },
+        ],
+        errors: [],
+      })),
+    } as any;
+    const ctx = createTestContext();
 
-      process.env.ZAI_API_KEY = "account-two-credential";
-      const keyTwo = buildQuotaProviderStateCacheKey("zai", base as any);
-      expect(keyTwo).not.toBe(keyOne);
-      expect(keyTwo).not.toContain("account-two-credential");
+    const first = await fetchQuotaProviderResult({ provider, ctx, ttlMs: 60_000 });
+    const firstCached = await fetchQuotaProviderResult({ provider, ctx, ttlMs: 60_000 });
+    credential = "account-two-credential";
+    const second = await fetchQuotaProviderResult({ provider, ctx, ttlMs: 60_000 });
 
-      delete process.env.ZAI_API_KEY;
-      const keyWithoutCredentials = buildQuotaProviderStateCacheKey("zai", base as any);
-      expect(keyWithoutCredentials).not.toContain("credFingerprint=");
+    expect(first.entries[0]?.percentRemaining).toBe(75);
+    expect(firstCached.entries[0]?.percentRemaining).toBe(75);
+    expect(second.entries[0]?.percentRemaining).toBe(25);
+    expect(provider.fetch).toHaveBeenCalledTimes(2);
 
-      const injected = buildQuotaProviderStateCacheKey("zai", base as any, {
-        credentialEnv: { ZAI_API_KEY: "injected-credential" },
-      });
-      expect(injected).not.toBe(keyWithoutCredentials);
-      expect(injected).not.toContain("injected-credential");
-    } finally {
-      delete process.env.ZAI_API_KEY;
+    const cacheFiles = await readdir(`${TEST_RUNTIME_ROOT}/cache/quota-provider-state`);
+    expect(cacheFiles).toHaveLength(2);
+    expect(cacheFiles.join("\n")).not.toContain("account-one-credential");
+    expect(cacheFiles.join("\n")).not.toContain("account-two-credential");
+    for (const file of cacheFiles) {
+      const persisted = await readFile(
+        `${TEST_RUNTIME_ROOT}/cache/quota-provider-state/${file}`,
+        "utf8",
+      );
+      expect(persisted).not.toContain("account-one-credential");
+      expect(persisted).not.toContain("account-two-credential");
+      expect(persisted).not.toContain("rai1_");
     }
   });
 
-  it("fingerprints custom quota-provider apiKeyEnv values without embedding them", async () => {
-    const { buildQuotaProviderStateCacheKey } = await import("../src/lib/quota-state.js");
-    const base = createTestContext();
+  it("keeps unrelated-provider credential changes out of a provider cache scope", async () => {
+    const { deriveResolvedAuthIdentity } = await import("../src/lib/resolved-auth-identity.js");
+    const { fetchQuotaProviderResult } = await import("../src/lib/quota-state.js");
+    const providerACredential = "provider-a-account";
+    let providerBCredential = "provider-b-account-one";
+    const provider = {
+      id: "provider-a",
+      isAvailable: vi.fn(),
+      cachePolicy: {
+        kind: "resolved-auth",
+        resolveIdentity: () =>
+          deriveResolvedAuthIdentity({
+            providerId: "provider-a",
+            principal: { kind: "credential", value: providerACredential },
+          }),
+      },
+      fetch: vi.fn(async () => ({
+        attempted: true,
+        entries: [{ accounting: TEST_ACCOUNTING, name: "A", percentRemaining: 80 }],
+        errors: [],
+      })),
+    } as any;
+    const ctx = createTestContext();
+
+    await fetchQuotaProviderResult({ provider, ctx, ttlMs: 60_000 });
+    providerBCredential = "provider-b-account-two";
+    await fetchQuotaProviderResult({ provider, ctx, ttlMs: 60_000 });
+
+    expect(providerACredential).toBe("provider-a-account");
+    expect(providerBCredential).toBe("provider-b-account-two");
+    expect(provider.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses only the winning custom-provider credential in aggregate cache identity", async () => {
+    const { PROVIDER_CACHE_POLICIES } = await import("../src/providers/cache-policies.js");
+    const { fetchQuotaProviderResult } = await import("../src/lib/quota-state.js");
     const definition = {
       id: "custom-one",
       providerId: "provider-one",
       label: "Custom One",
+      mode: "remote-api",
       url: "https://one.example/key",
       format: "openrouter-key-v1",
       apiKeyEnv: "CUSTOM_QUOTA_KEY",
-    };
-    process.env.CUSTOM_QUOTA_KEY = "custom-account-one";
+    } as const;
+    const ctx = {
+      ...createTestContext(),
+      client: {
+        config: {
+          providers: async () => ({ data: { providers: [{ id: "provider-one" }] } }),
+          get: async () => ({ data: {} }),
+        },
+      },
+      resolveRuntimeProviderIds: async () => new Set(["provider-one"]),
+      config: { ...createTestContext().config, quotaProviders: [definition] },
+    } as any;
+    const provider = {
+      id: "quota-providers",
+      isAvailable: vi.fn(),
+      cachePolicy: PROVIDER_CACHE_POLICIES["quota-providers"],
+      fetch: vi.fn(async () => ({
+        attempted: true,
+        entries: [
+          {
+            accounting: TEST_ACCOUNTING,
+            name: "Custom",
+            percentRemaining: process.env.CUSTOM_QUOTA_KEY === "account-one" ? 70 : 30,
+          },
+        ],
+        errors: [],
+      })),
+    } as any;
+
+    process.env.CUSTOM_QUOTA_KEY = "account-one";
     try {
-      const keyOne = buildQuotaProviderStateCacheKey("quota-providers", {
-        ...base,
-        config: { ...base.config, quotaProviders: [definition] },
-      } as any);
-      expect(keyOne).toContain("CUSTOM_QUOTA_KEY");
-      expect(keyOne).not.toContain("custom-account-one");
+      const initialIdentity = await provider.cachePolicy.resolveIdentity(ctx, {
+        runtimeEligibleQuotaProviders: [definition],
+      });
+      const first = await fetchQuotaProviderResult({ provider, ctx, ttlMs: 60_000 });
+      process.env.ZAI_API_KEY = "unrelated-account-change";
+      const unrelatedChangeIdentity = await provider.cachePolicy.resolveIdentity(ctx, {
+        runtimeEligibleQuotaProviders: [definition],
+      });
+      expect(unrelatedChangeIdentity).toBe(initialIdentity);
+      const cached = await fetchQuotaProviderResult({ provider, ctx, ttlMs: 60_000 });
+      process.env.CUSTOM_QUOTA_KEY = "account-two";
+      const second = await fetchQuotaProviderResult({ provider, ctx, ttlMs: 60_000 });
 
-      process.env.CUSTOM_QUOTA_KEY = "custom-account-two";
-      const keyTwo = buildQuotaProviderStateCacheKey("quota-providers", {
-        ...base,
-        config: { ...base.config, quotaProviders: [definition] },
-      } as any);
-      expect(keyTwo).not.toBe(keyOne);
-      expect(keyTwo).not.toContain("custom-account-two");
-
-      delete process.env.CUSTOM_QUOTA_KEY;
-      const keyUnset = buildQuotaProviderStateCacheKey("quota-providers", {
-        ...base,
-        config: { ...base.config, quotaProviders: [definition] },
-      } as any);
-      expect(keyUnset).not.toContain("quotaProvidersCredFingerprint=");
+      expect(first.entries[0]?.percentRemaining).toBe(70);
+      expect(cached.entries[0]?.percentRemaining).toBe(70);
+      expect(second.entries[0]?.percentRemaining).toBe(30);
+      expect(provider.fetch).toHaveBeenCalledTimes(2);
     } finally {
       delete process.env.CUSTOM_QUOTA_KEY;
+      delete process.env.ZAI_API_KEY;
     }
   });
 
@@ -313,9 +404,8 @@ describe("quota-state shared cache", () => {
     const provider = {
       id: "quota-providers",
       isAvailable: vi.fn(),
-      fetch: vi.fn(async (ctx: any) => {
-        const catalog = await ctx.client.config.providers();
-        const name = catalog.data.providers[0].id;
+      fetch: vi.fn(async (_ctx: any, cacheContext: any) => {
+        const name = cacheContext.runtimeEligibleQuotaProviders[0].providerId;
         return {
           attempted: true,
           entries: [
@@ -340,6 +430,7 @@ describe("quota-state shared cache", () => {
           get: async () => ({ data: {} }),
         },
       },
+      resolveRuntimeProviderIds: async () => new Set([providerId]),
       config: {
         ...createTestContext().config,
         enabledProviders: "auto",
@@ -366,6 +457,66 @@ describe("quota-state shared cache", () => {
     expect(projectA.entries[0]?.name).toBe("project-a");
     expect(projectB.entries[0]?.name).toBe("project-b");
     expect(projectAAgain.entries[0]?.name).toBe("project-a");
+    expect(provider.fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not persist an aggregate when runtime eligibility changes during fetch", async () => {
+    const { PROVIDER_CACHE_POLICIES } = await import("../src/providers/cache-policies.js");
+    const { fetchQuotaProviderResult } = await import("../src/lib/quota-state.js");
+    const definitions = [
+      {
+        id: "project-a-source",
+        providerId: "project-a",
+        label: "Project A",
+        mode: "remote-api",
+        url: "https://a.example/accounting",
+        format: "quota-v1",
+      },
+      {
+        id: "project-b-source",
+        providerId: "project-b",
+        label: "Project B",
+        mode: "remote-api",
+        url: "https://b.example/accounting",
+        format: "quota-v1",
+      },
+    ] as const;
+    let availableProviderId = "project-a";
+    let fetchCount = 0;
+    const ctx = {
+      ...createTestContext(),
+      resolveRuntimeProviderIds: async () => new Set([availableProviderId]),
+      config: { ...createTestContext().config, quotaProviders: definitions },
+    } as any;
+    const provider = {
+      id: "quota-providers",
+      isAvailable: vi.fn(),
+      cachePolicy: PROVIDER_CACHE_POLICIES["quota-providers"],
+      fetch: vi.fn(async (_ctx: any, cacheContext: any) => {
+        const selected = cacheContext.runtimeEligibleQuotaProviders[0].providerId;
+        fetchCount += 1;
+        if (fetchCount === 1) availableProviderId = "project-b";
+        return {
+          attempted: true,
+          entries: [
+            {
+              accounting: { ...TEST_ACCOUNTING, ownership: "user_configured" },
+              name: selected,
+              percentRemaining: 50,
+            },
+          ],
+          errors: [],
+        };
+      }),
+    } as any;
+
+    const changedDuringFetch = await fetchQuotaProviderResult({ provider, ctx, ttlMs: 60_000 });
+    const stable = await fetchQuotaProviderResult({ provider, ctx, ttlMs: 60_000 });
+    const cached = await fetchQuotaProviderResult({ provider, ctx, ttlMs: 60_000 });
+
+    expect(changedDuringFetch.entries[0]?.name).toBe("project-a");
+    expect(stable.entries[0]?.name).toBe("project-b");
+    expect(cached.entries[0]?.name).toBe("project-b");
     expect(provider.fetch).toHaveBeenCalledTimes(2);
   });
 
@@ -400,6 +551,9 @@ describe("quota-state shared cache", () => {
           },
           get: async () => ({ data: {} }),
         },
+      },
+      resolveRuntimeProviderIds: async () => {
+        throw new Error("catalog unavailable");
       },
       config: {
         ...createTestContext().config,
@@ -1289,6 +1443,7 @@ describe("quota-state shared cache", () => {
     } as any;
     const ctx = {
       ...createTestContext(),
+      resolveRuntimeProviderIds: async () => new Set(["provider-one"]),
       config: {
         ...createTestContext().config,
         quotaProviders: [
@@ -1900,7 +2055,7 @@ describe("readCachedProviderResult", () => {
       JSON.stringify({
         version: 2,
         packageVersion,
-        key,
+        key: createHash("sha256").update(key).digest("hex"),
         providerId: provider.id,
         timestamp: Date.now(),
         result: {

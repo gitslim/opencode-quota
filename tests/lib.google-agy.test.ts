@@ -24,6 +24,18 @@ const mocks = vi.hoisted(() => {
     inspectAgyCompanionPresence: vi.fn(),
     resolveAgyClientCredentials: vi.fn(),
     clearAgyCompanionCacheForTests: vi.fn(),
+    deriveResolvedAuthIdentity: vi.fn(
+      async (params: {
+        providerId: string;
+        principal: { kind: string };
+        qualifiers?: readonly string[];
+      }) =>
+        `identity:${params.providerId}:${params.principal.kind}:${(params.qualifiers ?? []).length}`,
+    ),
+    composeResolvedAuthIdentities: vi.fn(
+      async (params: { providerId: string; identities: readonly string[] }) =>
+        `composed:${params.providerId}:${params.identities.join("|")}`,
+    ),
   };
 });
 
@@ -41,6 +53,11 @@ vi.mock("../src/lib/google-token-cache.js", () => ({
   setCachedAccessToken: mocks.setCachedAccessToken,
 }));
 
+vi.mock("../src/lib/resolved-auth-identity.js", () => ({
+  deriveResolvedAuthIdentity: mocks.deriveResolvedAuthIdentity,
+  composeResolvedAuthIdentities: mocks.composeResolvedAuthIdentities,
+}));
+
 vi.mock("../src/lib/google-agy-companion.js", () => ({
   inspectAgyCompanionPresence: mocks.inspectAgyCompanionPresence,
   resolveAgyClientCredentials: mocks.resolveAgyClientCredentials,
@@ -53,6 +70,7 @@ import {
   queryGoogleAgyQuota,
   resolveAgyAccounts,
   resolveAgyConfiguredProjectId,
+  resolveGoogleAgyAuthIdentity,
 } from "../src/lib/google-agy.js";
 
 function mockJsonResponse(data: unknown, status = 200) {
@@ -149,6 +167,42 @@ describe("google agy logic", () => {
     delete process.env.OPENCODE_AGY_ENDPOINT;
     delete process.env.GOOGLE_CLOUD_PROJECT;
     delete process.env.GOOGLE_CLOUD_PROJECT_ID;
+  });
+
+  it("composes ordered account and winning companion identities without exposing them", async () => {
+    mocks.readAuthFileCached.mockResolvedValue({
+      "google-agy": authAccount("refresh-one", "project-one", "alice@example.com"),
+      "opencode-agy-auth": authAccount(
+        "refresh-one",
+        "project-one",
+        "ignored-duplicate@example.com",
+      ),
+      "google-agy-auth": authAccount("refresh-two", "project-two"),
+    });
+
+    const resolved = await resolveGoogleAgyAuthIdentity();
+
+    expect(resolved).toContain("composed:google-agy:");
+    expect(mocks.deriveResolvedAuthIdentity).toHaveBeenCalledWith({
+      providerId: "google-agy",
+      principal: {
+        kind: "stable-id",
+        value: "project-one\0alice@example.com",
+      },
+      qualifiers: [],
+    });
+    expect(mocks.deriveResolvedAuthIdentity).toHaveBeenCalledWith({
+      providerId: "google-agy",
+      principal: { kind: "credential", value: "refresh-two" },
+      qualifiers: ["project-two"],
+    });
+    expect(mocks.deriveResolvedAuthIdentity).toHaveBeenCalledWith({
+      providerId: "google-agy:companion",
+      principal: { kind: "credential", value: "client-secret" },
+      qualifiers: ["client-id"],
+    });
+    expect(mocks.composeResolvedAuthIdentities).toHaveBeenCalledOnce();
+    expect(JSON.stringify({ resolved })).not.toContain("ignored-duplicate@example.com");
   });
 
   it("parses packed refresh strings", () => {
