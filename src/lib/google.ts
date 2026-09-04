@@ -28,6 +28,11 @@ import {
 } from "./google-token-cache.js";
 import { fetchWithTimeout } from "./http.js";
 import { mapWithConcurrency } from "./map-with-concurrency.js";
+import {
+  composeResolvedAuthIdentities,
+  deriveResolvedAuthIdentity,
+  type ResolvedAuthIdentity,
+} from "./resolved-auth-identity.js";
 import type {
   AntigravityAccount,
   AntigravityAccountsFile,
@@ -235,6 +240,37 @@ export async function hasAntigravityQuotaRuntimeAvailable(): Promise<boolean> {
     authPresence.validAccountCount > 0 &&
     companionPresence.state === "present"
   );
+}
+
+export async function resolveGoogleAntigravityAuthIdentity(): Promise<ResolvedAuthIdentity | null> {
+  const [accounts, credentials] = await Promise.all([
+    readAntigravityAccounts(),
+    resolveAntigravityClientCredentials(),
+  ]);
+  if (!accounts || accounts.length === 0 || credentials.state !== "configured") return null;
+
+  const accountIdentities = await Promise.all(
+    accounts.map((account) =>
+      deriveResolvedAuthIdentity({
+        providerId: "google-antigravity",
+        principal: { kind: "credential" as const, value: account.refreshToken },
+        qualifiers: [getProjectId(account) ?? "missing-project-id"],
+      }),
+    ),
+  );
+  if (accountIdentities.some((identity) => identity === null)) return null;
+
+  const companionIdentity = await deriveResolvedAuthIdentity({
+    providerId: "google-antigravity:companion",
+    principal: { kind: "credential", value: credentials.clientSecret },
+    qualifiers: [credentials.clientId],
+  });
+  if (!companionIdentity) return null;
+
+  return composeResolvedAuthIdentities({
+    providerId: "google-antigravity",
+    identities: [...(accountIdentities as ResolvedAuthIdentity[]), companionIdentity],
+  });
 }
 
 /**

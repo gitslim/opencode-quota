@@ -1157,10 +1157,86 @@ describe("quota-state shared cache", () => {
       bypassCache: true,
     });
     expect(collectMetric("opencode.quota.consumed")).toEqual([0.9]);
-    expect(collectMetric("opencode.quota.cache.age")).toEqual([0.6]);
+    expect(collectMetric("opencode.quota.cache.age")).toEqual([]);
 
     provider.fetch.mockResolvedValueOnce({ attempted: true, entries: [], errors: [] });
     await quotaState.fetchQuotaProviderResult({ provider, ctx, ttlMs: 0 });
+    expect(collectMetric("opencode.quota.consumed")).toEqual([]);
+    expect(collectMetric("opencode.quota.cache.age")).toEqual([]);
+
+    telemetry.__resetQuotaTelemetryForTests();
+  });
+
+  it("replaces cached telemetry when auth identity fails closed, including empty results", async () => {
+    const callbacks = new Map<
+      string,
+      (result: { observe(value: number, attributes?: Record<string, unknown>): void }) => void
+    >();
+    const collectMetric = (name: string) => {
+      const values: number[] = [];
+      callbacks.get(name)?.({ observe: (value) => values.push(value) });
+      return values;
+    };
+    const telemetry = await import("../src/lib/quota-telemetry.js");
+    telemetry.__resetQuotaTelemetryForTests();
+    telemetry.__setQuotaTelemetryApiLoaderForTests(async () => ({
+      metrics: {
+        getMeter: () => ({
+          createObservableGauge: (name: string) => ({
+            addCallback: (
+              callback: (result: {
+                observe(value: number, attributes?: Record<string, unknown>): void;
+              }) => void,
+            ) => callbacks.set(name, callback),
+            removeCallback: () => {},
+          }),
+        }),
+      },
+    }));
+
+    const quotaState = await import("../src/lib/quota-state.js");
+    quotaState.__resetQuotaStateForTests();
+    const ctx = createTestContext();
+    ctx.config.telemetryToken = telemetry.configureQuotaTelemetry({
+      owner: ctx.client,
+      enabled: true,
+      identity: "identity-transition",
+    });
+    let resolvedIdentity: string | null = `rai1_${"d".repeat(43)}`;
+    const provider = {
+      id: "synthetic",
+      cachePolicy: {
+        kind: "resolved-auth",
+        resolveIdentity: vi.fn(async () => resolvedIdentity),
+      },
+      isAvailable: vi.fn(),
+      fetch: vi
+        .fn()
+        .mockResolvedValueOnce({
+          attempted: true,
+          entries: [{ accounting: TEST_ACCOUNTING, name: "Cached", percentRemaining: 50 }],
+          errors: [],
+        })
+        .mockResolvedValueOnce({
+          attempted: true,
+          entries: [{ accounting: TEST_ACCOUNTING, name: "Uncached", percentRemaining: 25 }],
+          errors: [],
+        })
+        .mockResolvedValueOnce({ attempted: true, entries: [], errors: [] }),
+    } as any;
+
+    vi.spyOn(Date, "now").mockReturnValue(1_000);
+    await quotaState.fetchQuotaProviderResult({ provider, ctx, ttlMs: 60_000 });
+    await telemetry.__flushQuotaTelemetryInitializationForTests();
+    expect(collectMetric("opencode.quota.consumed")).toEqual([0.5]);
+    expect(collectMetric("opencode.quota.cache.age")).toEqual([0]);
+
+    resolvedIdentity = null;
+    await quotaState.fetchQuotaProviderResult({ provider, ctx, ttlMs: 60_000 });
+    expect(collectMetric("opencode.quota.consumed")).toEqual([0.75]);
+    expect(collectMetric("opencode.quota.cache.age")).toEqual([]);
+
+    await quotaState.fetchQuotaProviderResult({ provider, ctx, ttlMs: 60_000 });
     expect(collectMetric("opencode.quota.consumed")).toEqual([]);
     expect(collectMetric("opencode.quota.cache.age")).toEqual([]);
 

@@ -2,10 +2,14 @@ import {
   DEFAULT_ALIBABA_AUTH_CACHE_MAX_AGE_MS,
   resolveAlibabaCodingPlanAuthCached,
 } from "../lib/alibaba-auth.js";
+import { resolveAnthropicAuthIdentity } from "../lib/anthropic.js";
 import { resolveChutesApiKey } from "../lib/chutes-config.js";
+import { resolveCopilotAuthIdentity } from "../lib/copilot.js";
 import { resolveDeepSeekApiKey } from "../lib/deepseek-auth.js";
 import type { QuotaProviderCachePolicy } from "../lib/entries.js";
+import { resolveGoogleAntigravityAuthIdentity } from "../lib/google.js";
 import { resolveGoogleAgyAuthIdentity } from "../lib/google-agy.js";
+import { resolveGeminiCliAuthIdentity } from "../lib/google-gemini-cli.js";
 import { resolveKiloApiKey } from "../lib/kilo-config.js";
 import { DEFAULT_KIMI_AUTH_CACHE_MAX_AGE_MS, resolveKimiAuthCached } from "../lib/kimi-auth.js";
 import {
@@ -28,6 +32,7 @@ import {
   DEFAULT_OPENCODE_ZEN_CONFIG_CACHE_MAX_AGE_MS,
   resolveOpenCodeZenConfigCached,
 } from "../lib/opencode-zen-config.js";
+import { resolveOpenRouterAuthIdentity } from "../lib/openrouter.js";
 import type { CanonicalQuotaProviderId } from "../lib/provider-registration.js";
 import type {
   QuotaProviderDefinition,
@@ -40,6 +45,7 @@ import {
   type ResolvedAuthIdentity,
 } from "../lib/resolved-auth-identity.js";
 import { resolveSyntheticApiKey } from "../lib/synthetic-config.js";
+import { resolveXaiAuthIdentity } from "../lib/xai.js";
 import { DEFAULT_ZAI_AUTH_CACHE_MAX_AGE_MS, resolveZaiAuthCached } from "../lib/zai-auth.js";
 import { DEFAULT_ZHIPU_AUTH_CACHE_MAX_AGE_MS, resolveZhipuAuthCached } from "../lib/zhipu-auth.js";
 
@@ -111,13 +117,23 @@ const quotaProvidersCachePolicy: QuotaProviderCachePolicy = {
 };
 
 export const PROVIDER_CACHE_POLICIES = {
-  anthropic: UNCACHED,
-  copilot: UNCACHED,
+  anthropic: {
+    kind: "resolved-auth",
+    resolveIdentity: (ctx) =>
+      resolveAnthropicAuthIdentity({ binaryPath: ctx.config.anthropicBinaryPath }),
+  },
+  copilot: {
+    kind: "resolved-auth",
+    resolveIdentity: () => resolveCopilotAuthIdentity(),
+  },
   openai: {
     kind: "resolved-auth",
     resolveIdentity: () => resolveOpenAIAuthIdentity(),
   },
-  openrouter: UNCACHED,
+  openrouter: {
+    kind: "resolved-auth",
+    resolveIdentity: () => resolveOpenRouterAuthIdentity(),
+  },
   kilo: resolvedCredentialPolicy("kilo", async () => {
     const resolved = await resolveKiloApiKey();
     return resolved ? { credential: resolved.key } : null;
@@ -140,8 +156,14 @@ export const PROVIDER_CACHE_POLICIES = {
     const resolved = await resolveChutesApiKey();
     return resolved ? { credential: resolved.key } : null;
   }),
-  "google-antigravity": UNCACHED,
-  "google-gemini-cli": UNCACHED,
+  "google-antigravity": {
+    kind: "resolved-auth",
+    resolveIdentity: () => resolveGoogleAntigravityAuthIdentity(),
+  },
+  "google-gemini-cli": {
+    kind: "resolved-auth",
+    resolveIdentity: (ctx) => resolveGeminiCliAuthIdentity(ctx.client),
+  },
   "google-agy": {
     kind: "resolved-auth",
     resolveIdentity: (ctx) => resolveGoogleAgyAuthIdentity(ctx.client),
@@ -184,7 +206,10 @@ export const PROVIDER_CACHE_POLICIES = {
     const resolved = await resolveDeepSeekApiKey();
     return resolved ? { credential: resolved.key } : null;
   }),
-  xai: UNCACHED,
+  xai: {
+    kind: "resolved-auth",
+    resolveIdentity: () => resolveXaiAuthIdentity(),
+  },
   xiaomi: resolvedCredentialPolicy("xiaomi", async () => {
     const resolved = await resolveMimoConfigCached({
       maxAgeMs: DEFAULT_MIMO_CONFIG_CACHE_MAX_AGE_MS,

@@ -16,18 +16,18 @@ describe("provider cache policies", () => {
       .filter(([, policy]) => policy.kind === "uncached")
       .map(([id]) => id)
       .sort();
-    expect(uncached).toEqual(
-      [
-        "anthropic",
-        "copilot",
-        "cursor",
-        "google-antigravity",
-        "google-gemini-cli",
-        "openrouter",
-        "qwen-code",
-        "xai",
-      ].sort(),
-    );
+    expect(uncached).toEqual(["cursor", "qwen-code"]);
+
+    for (const id of [
+      "anthropic",
+      "copilot",
+      "google-antigravity",
+      "google-gemini-cli",
+      "openrouter",
+      "xai",
+    ] as const) {
+      expect(PROVIDER_CACHE_POLICIES[id].kind).toBe("resolved-auth");
+    }
   });
 
   it("attaches the exhaustive policy to the stable provider singleton", () => {
